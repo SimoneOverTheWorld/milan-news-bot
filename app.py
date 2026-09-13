@@ -1,9 +1,8 @@
 import os
 import logging
 import html
-import re
 import httpx
-from bs4 import BeautifulSoup
+import feedparser
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from starlette.applications import Starlette
@@ -23,9 +22,11 @@ if not BOT_TOKEN:
 
 application = Application.builder().token(BOT_TOKEN).build()
 
-HOMEPAGE_URL = "https://www.pianetamilan.it/"
+# Feed RSS della Gazzetta dello Sport - Serie A
+RSS_URL = "https://www.gazzetta.it/dynamic-feed/rss/section/Calcio/Serie-A.xml"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MilanNewsBot/1.0)"}
 MAX_TITLE_LEN = 120
+FILTER_KEYWORD = "Milan"
 
 def clean_title(text: str) -> str:
     text = " ".join(text.split())
@@ -33,73 +34,42 @@ def clean_title(text: str) -> str:
         text = text[:MAX_TITLE_LEN].rsplit(" ", 1)[0] + "…"
     return text
 
-def extract_date(art) -> str:
-    """Cerca una data dentro la card dell'articolo."""
-    # 1) Tag <time> (standard)
-    t = art.find("time")
-    if t:
-        txt = t.get_text(strip=True)
-        if txt:
-            return " ".join(txt.split())
-        dt = t.get("datetime")
-        if dt:
-            return dt[:16].replace("T", " ")
-    # 2) Fallback: cerca pattern "13 settembre - 07:30" nel testo
-    text = art.get_text(" ", strip=True)
-    m = re.search(
-        r"\d{1,2}\s+(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)(?:\s*-\s*\d{1,2}:\d{2})?",
-        text, re.IGNORECASE
-    )
-    return m.group(0) if m else ""
+def format_date(pub_date: str) -> str:
+    """Formatta la data RSS in modo leggibile."""
+    # Esempio: "Mon, 13 Oct 2025 10:59:09 +0200"
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(pub_date)
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return pub_date[:16] if pub_date else ""
 
-def extract_author(art) -> str:
-    """Cerca l'autore dentro la card dell'articolo."""
-    # Prova classi comuni
-    for cls in ["author", "byline", "autore", "entry-author", "post-author"]:
-        el = art.find(class_=re.compile(cls, re.IGNORECASE))
-        if el:
-            txt = " ".join(el.get_text(" ", strip=True).split())
-            if txt and len(txt) < 60:
-                return txt
-    return ""
-
-async def fetch_homepage_news(limit=5):
+async def fetch_gazzetta_news(limit=5):
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=HEADERS) as client:
-        resp = await client.get(HOMEPAGE_URL)
+        resp = await client.get(RSS_URL)
         resp.raise_for_status()
-        html_text = resp.text
+        feed_content = resp.text
 
-    soup = BeautifulSoup(html_text, "html.parser")
+    feed = feedparser.parse(feed_content)
     articles = []
-    seen = set()
 
-    for art in soup.find_all("article"):
-        a = art.find("a", href=True)
-        if not a:
+    for entry in feed.entries:
+        title = entry.get("title", "")
+        # Filtra solo articoli che contengono "Milan" nel titolo
+        if FILTER_KEYWORD.lower() not in title.lower():
             continue
 
-        # Titolo: prova h1/h2/h3 dentro l'articolo, fallback al testo del link
-        title_el = art.find(["h1", "h2", "h3"])
-        title = clean_title((title_el or a).get_text(strip=True))
-        if not title or len(title) < 20:
-            continue
+        title = clean_title(title)
+        link = entry.get("link", "#")
+        pub = format_date(entry.get("published", ""))
 
-        href = a["href"]
-        if href.startswith("/"):
-            href = HOMEPAGE_URL.rstrip("/") + href
-        if not href.startswith("http") or href in seen:
-            continue
-
-        date_str = extract_date(art)
-        author = extract_author(art)
-
-        seen.add(href)
         articles.append({
             "title": title,
-            "url": href,
-            "date": date_str,
-            "author": author,
+            "url": link,
+            "date": pub,
+            "author": entry.get("author", ""),
         })
+
         if len(articles) >= limit:
             break
 
@@ -111,12 +81,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def notizie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Recupero le ultime notizie...")
     try:
-        articles = await fetch_homepage_news(limit=5)
+        articles = await fetch_gazzetta_news(limit=5)
         if not articles:
-            await update.message.reply_text("⚠️ Nessuna notizia trovata. Riprova più tardi.")
+            await update.message.reply_text("⚠️ Nessuna notizia sul Milan trovata al momento. Riprova più tardi.")
             return
 
-        blocks = ["<b>⚽️ Ultime notizie dal Milan</b>"]
+        blocks = ["<b>⚽️ Ultime notizie dal Milan (Gazzetta)</b>"]
         for i, art in enumerate(articles, 1):
             title = html.escape(art["title"])
             url = html.escape(art["url"], quote=True)

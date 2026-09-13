@@ -9,6 +9,7 @@ from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 import uvicorn
+from email.utils import parsedate_to_datetime
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -22,8 +23,10 @@ if not BOT_TOKEN:
 
 application = Application.builder().token(BOT_TOKEN).build()
 
-# Feed RSS della Gazzetta dello Sport - Serie A
-RSS_URL = "https://www.gazzetta.it/dynamic-feed/rss/section/Calcio/Serie-A.xml"
+# Feed RSS
+RSS_SERIE_A = "https://www.gazzetta.it/dynamic-feed/rss/section/Calcio/Serie-A.xml"
+RSS_CALCIOMERCATO = "https://www.gazzetta.it/dynamic-feed/rss/section/Calciomercato.xml"
+
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MilanNewsBot/1.0)"}
 MAX_TITLE_LEN = 120
 FILTER_KEYWORD = "Milan"
@@ -35,18 +38,16 @@ def clean_title(text: str) -> str:
     return text
 
 def format_date(pub_date: str) -> str:
-    """Formatta la data RSS in modo leggibile."""
-    # Esempio: "Mon, 13 Oct 2025 10:59:09 +0200"
     try:
-        from email.utils import parsedate_to_datetime
         dt = parsedate_to_datetime(pub_date)
         return dt.strftime("%d/%m/%Y %H:%M")
     except Exception:
         return pub_date[:16] if pub_date else ""
 
-async def fetch_gazzetta_news(limit=5):
+async def fetch_news(rss_url: str, limit: int = 5):
+    """Funzione generica per recuperare notizie da un feed RSS."""
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=HEADERS) as client:
-        resp = await client.get(RSS_URL)
+        resp = await client.get(rss_url)
         resp.raise_for_status()
         feed_content = resp.text
 
@@ -55,7 +56,6 @@ async def fetch_gazzetta_news(limit=5):
 
     for entry in feed.entries:
         title = entry.get("title", "")
-        # Filtra solo articoli che contengono "Milan" nel titolo
         if FILTER_KEYWORD.lower() not in title.lower():
             continue
 
@@ -76,43 +76,63 @@ async def fetch_gazzetta_news(limit=5):
     return articles
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Ciao! Sono il bot del Milan. Usa /notizie per le ultime.")
+    await update.message.reply_text(
+        "Ciao! Sono il bot del Milan.\n"
+        "Usa /notizie per le ultime notizie generali.\n"
+        "Usa /mercato per le ultime notizie di calciomercato."
+    )
 
 async def notizie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Recupero le ultime notizie...")
     try:
-        articles = await fetch_gazzetta_news(limit=5)
+        articles = await fetch_news(RSS_SERIE_A, limit=5)
         if not articles:
             await update.message.reply_text("⚠️ Nessuna notizia sul Milan trovata al momento. Riprova più tardi.")
             return
-
-        blocks = ["<b>⚽️ Ultime notizie dal Milan (Gazzetta)</b>"]
-        for i, art in enumerate(articles, 1):
-            title = html.escape(art["title"])
-            url = html.escape(art["url"], quote=True)
-            block = f'{i}. <a href="{url}">{title}</a>'
-
-            refs = []
-            if art["date"]:
-                refs.append(f'📅 {html.escape(art["date"])}')
-            if art["author"]:
-                refs.append(f'✍️ {html.escape(art["author"])}')
-            if refs:
-                block += "\n" + "  ·  ".join(refs)
-
-            blocks.append(block)
-
-        await update.message.reply_text(
-            "\n\n".join(blocks),
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
+        await send_articles(update, articles, "Ultime notizie dal Milan (Serie A)")
     except Exception as e:
         logger.error(f"Errore recupero notizie: {e}")
         await update.message.reply_text("❌ Errore nel recupero delle notizie. Riprova più tardi.")
 
+async def mercato(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("⏳ Recupero le ultime notizie di calciomercato...")
+    try:
+        articles = await fetch_news(RSS_CALCIOMERCATO, limit=5)
+        if not articles:
+            await update.message.reply_text("⚠️ Nessuna notizia di calciomercato sul Milan trovata al momento. Riprova più tardi.")
+            return
+        await send_articles(update, articles, "Ultime notizie di calciomercato (Milan)")
+    except Exception as e:
+        logger.error(f"Errore recupero notizie di mercato: {e}")
+        await update.message.reply_text("❌ Errore nel recupero delle notizie. Riprova più tardi.")
+
+async def send_articles(update: Update, articles: list, header: str) -> None:
+    """Invia la lista di articoli formattata."""
+    blocks = [f"<b>⚽️ {header}</b>"]
+    for i, art in enumerate(articles, 1):
+        title = html.escape(art["title"])
+        url = html.escape(art["url"], quote=True)
+        block = f'{i}. <a href="{url}">{title}</a>'
+
+        refs = []
+        if art["date"]:
+            refs.append(f'📅 {html.escape(art["date"])}')
+        if art["author"]:
+            refs.append(f'✍️ {html.escape(art["author"])}')
+        if refs:
+            block += "\n" + "  ·  ".join(refs)
+
+        blocks.append(block)
+
+    await update.message.reply_text(
+        "\n\n".join(blocks),
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("notizie", notizie))
+application.add_handler(CommandHandler("mercato", mercato))
 
 async def telegram_webhook(request):
     data = await request.json()

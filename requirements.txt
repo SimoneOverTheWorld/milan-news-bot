@@ -3,3 +3,4 @@ uvicorn
 starlette
 httpx
 feedparser
+apscheduler

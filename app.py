@@ -1,6 +1,7 @@
 import os
 import logging
 import httpx
+from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from starlette.applications import Starlette
@@ -20,7 +21,49 @@ if not BOT_TOKEN:
 
 application = Application.builder().token(BOT_TOKEN).build()
 
-NEWS_API_URL = "https://freenewsapi.ai/v1/search?host=www.pianetamilan.it&size=5"
+HOMEPAGE_URL = "https://www.pianetamilan.it/"
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MilanNewsBot/1.0)"}
+
+async def fetch_homepage_news(limit=5):
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=HEADERS) as client:
+        resp = await client.get(HOMEPAGE_URL)
+        resp.raise_for_status()
+        html = resp.text
+
+    soup = BeautifulSoup(html, "html.parser")
+    articles = []
+    seen = set()
+
+    # Strategia 1: tag <article>
+    for art in soup.find_all("article"):
+        a = art.find("a", href=True)
+        if not a:
+            continue
+        title = a.get_text(strip=True)
+        href = a["href"]
+        if not title or len(title) < 20 or href in seen:
+            continue
+        seen.add(href)
+        articles.append({"title": title, "url": href})
+        if len(articles) >= limit:
+            break
+
+    # Strategia 2 (fallback): h2/h3 con link
+    if len(articles) < limit:
+        for h in soup.find_all(["h2", "h3"]):
+            a = h.find("a", href=True)
+            if not a:
+                continue
+            title = a.get_text(strip=True)
+            href = a["href"]
+            if not title or len(title) < 20 or href in seen:
+                continue
+            seen.add(href)
+            articles.append({"title": title, "url": href})
+            if len(articles) >= limit:
+                break
+
+    return articles
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Ciao! Sono il bot del Milan. Usa /notizie per le ultime.")
@@ -28,33 +71,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def notizie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Recupero le ultime notizie...")
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(NEWS_API_URL)
-            resp.raise_for_status()
-            data = resp.json()
-
-        articles = data.get("results", [])
+        articles = await fetch_homepage_news(limit=5)
         if not articles:
-            await update.message.reply_text("⚠️ Nessuna notizia trovata al momento. Riprova più tardi.")
+            await update.message.reply_text("⚠️ Nessuna notizia trovata. Riprova più tardi.")
             return
 
         lines = ["⚽️ *Ultime notizie dal Milan:*\n"]
         for i, art in enumerate(articles, 1):
-            title = art.get("title", "Titolo non disponibile")
-            url = art.get("url", "#")
-            pub = art.get("published_at", "")
-            if pub:
-                pub = pub[:16].replace("T", " ")  # "2026-08-25 21:53"
-            lines.append(f"{i}. [{title}]({url})")
-            if pub:
-                lines.append(f"   🕐 {pub} UTC")
+            lines.append(f"{i}. [{art['title']}]({art['url']})")
 
         await update.message.reply_text(
             "\n".join(lines),
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
-
     except Exception as e:
         logger.error(f"Errore recupero notizie: {e}")
         await update.message.reply_text("❌ Errore nel recupero delle notizie. Riprova più tardi.")
